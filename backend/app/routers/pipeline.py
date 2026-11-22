@@ -49,10 +49,15 @@ def collect_pipeline_metrics() -> dict[str, Any]:
 def check_schema_compatibility(
     schema_name: str = Query(...),
     new_fields: str = Query(...),
+    record: bool = Query(default=True),
 ) -> dict[str, Any]:
-    """检查Schema兼容性。"""
-    engine = DataQualityEngine()
+    """检查Schema兼容性；默认留存报告，供映射发布时关联。"""
     fields = [f.strip() for f in new_fields.split(",") if f.strip()]
+    if record:
+        from app.engine import transform_handover as handover
+        handover.assert_topic_schema(schema_name)
+        return handover.check_compatibility(schema_name=schema_name, candidate_fields=fields)
+    engine = DataQualityEngine()
     return engine.check_schema_compatibility(schema_name=schema_name, new_fields=fields)
 
 

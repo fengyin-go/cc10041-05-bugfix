@@ -71,6 +71,33 @@ npm run dev
 | 数据采样 | `data_sample` | 采样配置 | 配置名称、采样比例、采样方式 |
 | 计算血缘追踪 | `lineage_tracker` | 血缘条目 | 输入表、转换管道、输出表 |
 
+## 交接期转换
+
+Schema 注册页内嵌「交接期转换」面板，也可以直接调接口：
+
+| 步骤 | 接口 |
+| --- | --- |
+| 生成字段兼容报告 | `POST /api/schema_registry/compatibility`（或 `POST /api/pipeline/quality/schema/check`） |
+| 查询兼容报告 | `GET /api/schema_registry/compatibility/{report_id}` |
+| 发布映射（须关联相符报告） | `POST /api/transform/mappings` |
+| 发布确认 | `POST /api/transform/mappings/{id}/confirm` |
+| 受理消息 | `POST /api/transform/messages` |
+| 放行待转换 | `POST /api/transform/messages/release` |
+| 按交易号查结果 | `GET /api/transform/results/{message_id}` |
+| 收入汇总 | `GET /api/transform/income/summary` |
+
+字段兼容报告把「双向兼容」拆成 `backward` / `forward` 两个方向，各自核对必需列
+（默认 `id` 与金额列，金额列接受 `amount` / `total` / `gross_total` 别名）。
+兼容类型缺省或无法识别时按双向处理，不再跳过字段比较。
+
+交接规则：
+
+- 映射发布必须关联与**本次候选字段定义**一致的兼容报告；删列后拿旧报告发布会被拒绝。
+- 消息受理时冻结当时的映射版本；映射发布后新受理的消息才用新版本，已受理的仍按原版本转换。
+- 未获发布确认的映射不参与收入汇总；确认回执到达后才计入。
+- 缺少必需列的输入只留存原件，不产生转换结果，也不计入收入汇总。
+- 同一交易号重复投递只确认一次。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。

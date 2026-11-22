@@ -545,3 +545,23 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '血缘类型': '计算血缘追踪样例3',
   '记录时间': '2026-09-03'}]
 }
+
+# 交接期示例：订单主题登记了 id + amount，兼容类型用「双向兼容」的写法，
+# 候选字段删列时必须判为不兼容；金额列允许 amount/total/gross_total 三个别名。
+SEED_ROWS["schema_registry"].append({
+    "id": 4,
+    "Schema名称": "orders",
+    "字段列表": "id,amount,total,gross_total",
+    "版本号": "v1",
+    "兼容类型": "双向兼容",
+    "注册状态": "已注册",
+    "必需字段": "id,amount",
+    "金额别名": "amount,total,gross_total",
+    "status": "已注册",
+    "pending": False,
+    "abnormal": False,
+})
+
+SEED_ROWS.setdefault("schema_compatibility_reports", [])
+SEED_ROWS.setdefault("transform_messages", [])
+SEED_ROWS.setdefault("transform_results", [])

@@ -34,6 +34,7 @@ class StreamPipeline:
     records_processed: int = 0
     records_side_output: int = 0
     window_results: list[dict[str, Any]] = field(default_factory=list)
+    excluded_records: list[dict[str, Any]] = field(default_factory=list)
 
     def run(self, *, batch_id: str | None = None) -> dict[str, Any]:
         """执行一次完整的流处理管线：从数据源消费到检查点提交。"""
@@ -41,6 +42,7 @@ class StreamPipeline:
         self.records_processed = 0
         self.records_side_output = 0
         self.window_results = []
+        self.excluded_records = []
 
         source_data = self._consume_source()
         if not source_data:
@@ -59,6 +61,8 @@ class StreamPipeline:
             "batch_id": self.batch_id,
             "records_processed": self.records_processed,
             "records_side_output": self.records_side_output,
+            "records_excluded": len(self.excluded_records),
+            "excluded_originals": self.excluded_records,
             "window_count": len(self.window_results),
             "aggregation_count": len(main_output),
             "checkpoint_committed": True,
@@ -95,32 +99,59 @@ class StreamPipeline:
         return records
 
     def _apply_transform(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """按转换规则解析消息负载并映射字段。"""
+        """按转换规则解析消息负载并映射字段。
+
+        金额列按合法别名取值；取不到就保留原始负载并标记为缺少必需列，
+        不再悄悄用 0.0 填充，避免收入汇总与真实金额对不上。
+        """
         rules = store.rows(self.transform_key)
         active_rules = [r for r in rules if r.get("status") == "已发布"]
         if not active_rules or not records:
             return records
         rule = active_rules[0]
+        field_map = rule.get("字段映射") if isinstance(rule.get("字段映射"), dict) else {}
+        raw_aliases = rule.get("金额别名") or ["amount", "total", "gross_total"]
+        if isinstance(raw_aliases, str):
+            raw_aliases = raw_aliases.split(",")
+        aliases = [str(alias).strip() for alias in raw_aliases if str(alias).strip()]
         transformed = []
         for rec in records:
             try:
                 payload = json.loads(rec.get("payload", "{}"))
-                transformed.append({
-                    **rec,
-                    "transformed_by": rule.get("规则名称", ""),
-                    "event_type": payload.get("event_type", "unknown"),
-                    "event_time_ms": payload.get("event_time", 0),
-                    "user_id": payload.get("user_id", ""),
-                    "item_id": payload.get("item_id", ""),
-                    "amount": payload.get("amount", 0.0),
-                    "transform_status": "ok",
-                })
-            except (json.JSONDecodeError, KeyError):
+            except json.JSONDecodeError:
                 transformed.append({
                     **rec,
                     "transformed_by": rule.get("规则名称", ""),
                     "transform_status": "payload_error",
+                    "payload_preserved": rec.get("payload"),
+                    "counted": False,
                 })
+                continue
+
+            amount, amount_source = None, None
+            mapped_amount = field_map.get("amount")
+            if mapped_amount and payload.get(mapped_amount) is not None:
+                amount, amount_source = payload.get(mapped_amount), mapped_amount
+            if amount is None:
+                for alias in aliases:
+                    alias = alias.strip()
+                    if alias and payload.get(alias) is not None:
+                        amount, amount_source = payload.get(alias), alias
+                        break
+
+            transformed.append({
+                **rec,
+                "transformed_by": rule.get("规则名称", ""),
+                "event_type": payload.get("event_type", "unknown"),
+                "event_time_ms": payload.get("event_time", 0),
+                "user_id": payload.get("user_id", ""),
+                "item_id": payload.get("item_id", ""),
+                "amount": amount,
+                "amount_source": amount_source,
+                "payload_preserved": rec.get("payload"),
+                "transform_status": "ok" if amount is not None else "missing_amount",
+                "counted": amount is not None,
+            })
         return transformed
 
     def _cleanse(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -184,6 +215,14 @@ class StreamPipeline:
 
         groups: dict[str, dict[str, Any]] = {}
         for rec in records:
+            # 缺少必需列（取不到金额）的记录只留原件，不进入聚合，更不能按 0 计入。
+            if rec.get("counted") is False:
+                self.excluded_records.append({
+                    "payload": rec.get("payload_preserved"),
+                    "transform_status": rec.get("transform_status"),
+                    "offset": rec.get("offset"),
+                })
+                continue
             key = str(rec.get(group_key, "unknown"))
             win = str(rec.get("window_id", "0"))
             composite = f"{key}:{win}"

@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
 from app.services import service_for
+from app.services.schema_registry import SchemaRegistryService
 
 router = APIRouter(prefix="/api", tags=["业务资源"])
 
@@ -19,6 +20,29 @@ def require_service(module: str):
     if service is None:
         raise HTTPException(status_code=404, detail=f"未知业务模块：{module}")
     return service
+
+
+@router.get("/schema_registry/compatibility/{report_id}", response_model=dict)
+def get_compatibility_report(report_id: str) -> dict[str, Any]:
+    """按报告号查询字段兼容报告（双向必需列核对明细）。"""
+    from app.engine import transform_handover as handover
+    report = handover.get_report(report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"兼容报告 {report_id} 不存在")
+    return report
+
+
+@router.post("/schema_registry/compatibility", response_model=dict)
+def create_compatibility_report(payload: EntryPayload) -> dict[str, Any]:
+    """对已注册 Schema 生成候选字段的兼容报告并留存。"""
+    values = payload.values
+    schema_name = str(values.get("Schema名称") or "").strip()
+    candidate = values.get("候选字段") or values.get("字段列表") or ""
+    if not schema_name or not candidate:
+        raise HTTPException(status_code=422, detail="需要 Schema名称 与 候选字段")
+    service = require_service("schema_registry")
+    assert isinstance(service, SchemaRegistryService)
+    return service.check_and_record(schema_name=schema_name, candidate_fields=candidate)
 
 
 @router.get("/{module}", response_model=PageResult[dict])

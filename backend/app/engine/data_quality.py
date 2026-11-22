@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.engine import field_compat, transform_handover
 from app.store import store
 
 
@@ -16,50 +17,38 @@ class DataQualityEngine:
     partition_key: str = "data_partition"
 
     def check_schema_compatibility(self, *, schema_name: str, new_fields: list[str]) -> dict[str, Any]:
-        """检查新增字段与已注册Schema的兼容性。"""
+        """检查候选字段与已注册Schema的双向兼容性。
+
+        两个方向分别核对必需列（id 与金额列），金额列接受合法别名。
+        删掉了必需列的候选在这里就会判为不兼容，不会被转换入口放行。
+        """
         schemas = store.rows(self.schema_key)
         registered = [s for s in schemas if s.get("status") == "已注册" and s.get("Schema名称") == schema_name]
         if not registered:
-            return {"compatible": True, "reason": "首次注册，无需兼容性检查", "schema_name": schema_name, "new_fields": new_fields}
+            return {
+                "compatible": True,
+                "reason": "首次注册，无需兼容性检查",
+                "schema_name": schema_name,
+                "new_fields": field_compat.parse_fields(new_fields),
+                "candidate_fields": field_compat.parse_fields(new_fields),
+            }
         existing = registered[0]
-        compat_type = existing.get("兼容类型", "backward")
-        existing_fields = str(existing.get("字段列表", "")).split(",")
+        report = field_compat.evaluate(
+            existing_fields=existing.get("字段列表", ""),
+            candidate_fields=new_fields,
+            required_fields=existing.get("必需字段") or field_compat.DEFAULT_REQUIRED_FIELDS,
+            amount_aliases=existing.get("金额别名") or field_compat.DEFAULT_AMOUNT_ALIASES,
+            compatibility_type=existing.get("兼容类型"),
+        )
+        report["schema_name"] = schema_name
+        report["existing_version"] = existing.get("版本号", "")
+        return report
 
-        result = {
-            "schema_name": schema_name,
-            "existing_version": existing.get("版本号", ""),
-            "existing_fields": [f.strip() for f in existing_fields if f.strip()],
-            "new_fields": new_fields,
-            "compatibility_type": compat_type,
-            "checked_at": int(time.time() * 1000),
-        }
-
-        if compat_type == "backward":
-            # 向后兼容：新字段不能删除已有字段
-            removed = [f for f in result["existing_fields"] if f not in new_fields]
-            result["compatible"] = len(removed) == 0
-            result["removed_fields"] = removed
-            result["added_fields"] = [f for f in new_fields if f not in result["existing_fields"]]
-            if not result["compatible"]:
-                result["reason"] = f"向后兼容失败：删除了已有字段 {removed}"
-            else:
-                result["reason"] = "向后兼容检查通过"
-        elif compat_type == "forward":
-            # 向前兼容：新字段可以新增但不能删除已有字段
-            removed = [f for f in result["existing_fields"] if f not in new_fields]
-            result["compatible"] = len(removed) == 0
-            result["removed_fields"] = removed
-            result["added_fields"] = [f for f in new_fields if f not in result["existing_fields"]]
-            if not result["compatible"]:
-                result["reason"] = f"向前兼容失败：删除了已有字段 {removed}"
-            else:
-                result["reason"] = "向前兼容检查通过"
-        else:
-            result["compatible"] = True
-            result["reason"] = f"兼容类型 {compat_type} 不做限制"
-            result["removed_fields"] = [f for f in result["existing_fields"] if f not in new_fields]
-            result["added_fields"] = [f for f in new_fields if f not in result["existing_fields"]]
-        return result
+    def check_and_record(self, *, schema_name: str, candidate_fields: list[str]) -> dict[str, Any]:
+        """生成兼容报告并留存，供映射发布时关联。"""
+        transform_handover.assert_topic_schema(schema_name)
+        return transform_handover.check_compatibility(
+            schema_name=schema_name, candidate_fields=candidate_fields)
 
     def create_snapshot(self, table_name: str) -> dict[str, Any]:
         """为Iceberg表创建快照。"""
